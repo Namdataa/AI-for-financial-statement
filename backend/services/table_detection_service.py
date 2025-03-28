@@ -23,8 +23,8 @@ from datetime import datetime
 # import base64
 # import tempfile
 
-from core.config import MODEL_SIGNATURE_PATH, MODEL_TABLE_TITLE_PATH, DEVICE, POPPLER_PATH, financial_tables, models, EXTRACTED_FOLDER
-from utils import retry_api_call, dataframe_to_json, json_to_dataframe
+from core.config import MODEL_SIGNATURE_PATH, MODEL_TABLE_TITLE_PATH, DEVICE, POPPLER_PATH, financial_tables, financial_tables_general,  models, EXTRACTED_FOLDER
+from utils import retry_api_call, json_to_dataframe, json_to_dataframe_table, json_to_dataframe_title
 from secret import api_keys
 
 
@@ -109,26 +109,13 @@ class TableDetectService:
                 # Để sleep để giúp model nghỉ, bị limit 1 phút không quá 2 lần
                 time.sleep(45)
 
-                for model in models:
-                    temperature, top_p, top_k = self.get_model_params(model) # Setup model, hiện tại đang dùng 2 model LLM từng model từng tham số
-                    for api_key in api_keys:
-                        json_title = retry_api_call(         #Hàm này để thay API luân phiên
-                            self.generate_title,            # Hàm này để dùng LLM chuẩn hóa lại dữ liệu tiếng Việt cho các Text ngoài bảng
-                            model,
-                            api_keys[api_key]["title"],
-                            temperature,
-                            top_p,
-                            top_k,
-                            dataframe_to_json(df_title),
-                            text_title,
-                        )
-                        if json_title:
-                            break
-                    if json_title:
-                        break
+                for api_key in api_keys:
+                  json_title = retry_api_call(generate_title, model, api_keys[api_key]['title'], dataframe_to_json(df_title), text_title)
+                  if json_title:
+                      break
                 print("Hoàn tất thử API.")
 
-                data_title = json_to_dataframe(json_title)  # Kết quả title của bảng
+                data_title = json_to_dataframe_title(json_title)  # Kết quả title của bảng
                 recognized_title = self.recognize_financial_table(
                     data_title, financial_tables, threshold=80
                 )  # Nhận diện xem title của bảng là gì có phù hợp với 3 tên bảng dự án đề ra không
@@ -151,65 +138,52 @@ class TableDetectService:
 
                 # Vòng lặp qua ảnh từ title đến chữ ký để trích xuất bảng
                 if selected_images:
-                    pre_name_column = None
-                    for img in selected_images:
-                        processed_image = self.Process_Image(img) # Hàm này nhận diện bảng trong page rồi cắt bảng, xoay bảng nếu có
-                        if processed_image is not None:
-                            df_table, text_table = self.process_pdf_image(processed_image) # Hàm này dùng OCR để trích xuất thông tin trong bảng, trả về 1 DataFrame và 1 text để giúp LLM hiểu ngữ nghĩa
-                            if not df_table.empty:    #Cái này để điều chỉnh token, ít token quá thì LLM kh trả đủ dữ liệu, nhiều quá thì nhanh tốn
+                  pre_name_column = None
+                  for img in selected_images:
+                      processed_image = Process_Image(img)
+                      # 2️⃣ Chuyển đổi ảnh sang CMYK và lấy kênh K
+                      _, _, _, black_channel = rgb_to_cmyk(processed_image)
+                      # 3️⃣ Điều chỉnh độ sáng & độ tương phản
+                      processed_image = adjust_contrast(black_channel, alpha=2.0, beta=-50)
+                      if processed_image is not None:
+                          df_table, text_table = process_pdf_image(processed_image, ocr)
+                          if not df_table.empty:
                                 if (len(df_table) < 101) and (len(df_table.columns) < 10):
-                                    token = 9000
+                                  token = 9000
                                 elif (len(df_table) < 201) and (len(df_table.columns) < 10):
-                                    token = 18000
+                                  token = 18000
                                 else:
-                                    token = 30000
+                                  token = 30000
                                 time.sleep(45)
-                                for model in models:
-                                    temperature, top_p, top_k = self.get_model_params(model)
-                                    for api_key in api_keys:
-                                        json_table = retry_api_call(    #Hàm này để thay luân phiên API key
-                                            self.generate_table,            #Dùng LLM để chuẩn hóa, fix lại dữ liệu đọc từ bảng
-                                            model,
-                                            api_keys[api_key]["table"],
-                                            temperature,
-                                            top_p,
-                                            top_k,
-                                            dataframe_to_json(df_table),
-                                            text_table,
-                                            token,
-                                            pre_name_column,
-                                        )
-                                        if json_table:
-                                            break
-                                    if json_table:
-                                        break
+                                if selected_images.index(img) ==0:
+                                  response_schema=generate_json_schema(dataframe_to_json(df_table))
+                                for api_key in api_keys:
+                                  json_table = retry_api_call(generate_table, model, api_keys[api_key]['table'],  dataframe_to_json(df_table), text_table, token, pre_name_column, response_schema)
+                                  if json_table:
+                                    break
                                 print("Hoàn tất thử API.")
 
-                                data_table = json_to_dataframe(json_table)
+                                data_table = json_to_dataframe_table(json_table)
 
-                                found = False  # Flag để thoát cả hai vòng lặp khi tìm thấy kết quả
-                                for column in data_table.columns:   # Ở phần này để giúp chuẩn hóa lại tên bảng, giúp gộp dữ liệu chuẩn hơn
-                                    for value in data_table[column].dropna(): #Có 1 số báo cáo tài chính bị sai tên bảng
-                                        value = self.normalize_text(value)
-
-                                        if "luu chuyen" in value:
-                                            recognized_title = "Báo cáo lưu chuyển tiền tệ"
-                                            found = True
-                                            break  # Thoát khỏi vòng lặp giá trị trong cột
-
-                                        if (
-                                            "doanh thu ban hang" in value
-                                            or "ban hang" in value
-                                        ):
-                                            recognized_title = (
-                                                "Báo cáo kết quả hoạt động kinh doanh"
-                                            )
-                                            found = True
-                                            break  # Thoát khỏi vòng lặp giá trị trong cột
-
-                                    if found:
-                                        break  # Thoát khỏi vòng lặp cột
-
+                                if selected_images.index(img) ==0:
+                                  found = False  # Flag để thoát cả hai vòng lặp khi tìm thấy kết quả
+                                  recognized_title = "Bảng cân đối kế toán"
+                                  for column in data_table.columns:
+                                      for value in data_table[column].dropna():
+                                          value = normalize_text(value)
+                                          print(value)
+    
+                                          if "luu chuyen" in value:
+                                              recognized_title = "Báo cáo lưu chuyển tiền tệ"
+                                              found = True
+                                              break  # Thoát khỏi vòng lặp giá trị trong cột
+    
+                                          elif "doanh thu ban hang" in value or "ban hang" in value:
+                                              recognized_title = "Báo cáo KQHĐKD"
+                                              found = True
+                                              break  # Thoát khỏi vòng lặp giá trị trong cột
+                                      if found:
+                                          break  # Thoát khỏi vòng lặp cột
                                 print(f"Fix nhận diện được là {recognized_title}")
 
                                 recognized_titles_set.add(recognized_title) #Lưu nó vào set đã tạo ở trước, giúp nhận diện nào đủ 3 bảng thì dừng lại
