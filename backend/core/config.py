@@ -5,8 +5,7 @@ DEVICE = "cpu"
 
 EXTRACTED_FOLDER = "extracted-files"
 UPLOAD_DIR = "uploads"
-ALLOWED_EXTENSIONS = {"pdf"}
-
+ALLOWED_EXTENSIONS = {"pdf"} 
 financial_tables = [
     "Bảng cân đối kế toán",
     "Báo cáo kết quả hoạt động kinh doanh",
